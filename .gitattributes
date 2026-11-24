@@ -1,0 +1,12 @@
+# Ensure shell scripts and config files always use LF line endings
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.wsgi text eol=lf
+*.conf text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.py text eol=lf
+*.csv text eol=lf
+*.md text eol=lf
+*.webm binary
+*.mp4 binary

@@ -1,0 +1,25 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment secrets
+.env
+
+# Uploaded video storage (mounted via Docker volume in production)
+uploads/
+
+# Intermediate Playwright video chunks
+video/page@*.webm
+
+# IDE and OS files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
