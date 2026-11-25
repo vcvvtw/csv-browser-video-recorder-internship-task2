@@ -56,7 +56,7 @@ internship_task2/
 ├── video_client.py             # Client API (UploadVideo, GetVideoURL with sidecar)
 ├── capture_video.py            # Automation recorder CLI
 ├── input.csv                   # Input company dataset
-├── requirements.txt            # Server dependencies (Flask, psycopg2-binary, pytest)
+├── requirements.txt            # Server dependencies (Flask, psycopg2-binary, requests, pytest)
 ├── requirements-client.txt     # Client dependencies (requests, playwright, pytest)
 ├── .env.example                # Environment variables template
 ├── .gitattributes              # LF line-ending and binary file rules
