@@ -31,7 +31,6 @@ def preview_video(video_url: str, view_seconds: int):
         page = context.new_page()
         page.goto(video_url, wait_until="domcontentloaded")
 
-        # Ensure video autoplays in browser preview
         try:
             page.evaluate("""() => {
                 const v = document.querySelector('video');
@@ -86,7 +85,6 @@ def main():
 
     upload_func = None
     if args.server:
-        # Lazy import of HTTP client
         from video_client import UploadVideo
         upload_func = UploadVideo
 
@@ -94,7 +92,6 @@ def main():
         sys.stderr.write(f"Error: CSV file not found at {args.csv}\n")
         sys.exit(1)
 
-    # Handle UTF-8 with or without BOM
     with open(args.csv, mode="r", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f, delimiter=";", quotechar='"')
         for row in reader:

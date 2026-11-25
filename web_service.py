@@ -110,7 +110,7 @@ def _async_process_zoom(
     processed_url: str,
     db_config: dict,
 ):
-    """Background worker to render Camtasia-style zoom using ffmpeg."""
+    """Background worker that renders video zoom with ffmpeg."""
     try:
         apply_zoom(file_path, sidecar_path=sidecar_path, output_path=dest_zoomed_path)
         conn = psycopg2.connect(**db_config)
@@ -226,6 +226,9 @@ def upload():
     base_dest_no_ext = os.path.splitext(dest_path)[0]
     default_sidecar_path = f"{base_dest_no_ext}.zoom.json"
 
+    zoomed_filename = f"{os.path.basename(base_dest_no_ext)}.zoomed.webm"
+    dest_zoomed_path = os.path.join(uploads_dir, zoomed_filename)
+
     if sidecar_file and sidecar_file.filename:
         sidecar_dest_path = default_sidecar_path
         sidecar_file.save(sidecar_dest_path)
@@ -243,15 +246,13 @@ def upload():
         with open(sidecar_dest_path, "w", encoding="utf-8") as sf:
             json.dump(parsed, sf, indent=2)
     else:
-        for stale in (default_sidecar_path, f"{dest_path}.zoom.json"):
+        for stale in (default_sidecar_path, f"{dest_path}.zoom.json", dest_zoomed_path):
             if os.path.exists(stale):
                 try:
                     os.remove(stale)
                 except OSError:
                     pass
 
-    zoomed_filename = f"{os.path.basename(base_dest_no_ext)}.zoomed.webm"
-    dest_zoomed_path = os.path.join(uploads_dir, zoomed_filename)
     processed_url = f"{request.host_url.rstrip('/')}/media/{zoomed_filename}"
     initial_status = "pending" if sidecar_dest_path else "none"
     sync_mode = (request.args.get("sync") or request.form.get("sync") or "").lower() in ("1", "true", "yes")

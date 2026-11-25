@@ -438,18 +438,13 @@ INJECT_OVERLAY_SCRIPT = """
         window.__triggerRipple(e.clientX, e.clientY, 450);
     }, { passive: true, capture: true });
 
-    window.addEventListener('beforeunload', () => {
-        try {
-            sessionStorage.setItem('__automation_cursor_hidden', '1');
-            document.querySelectorAll('.__automation_ripple').forEach(r => r.remove());
-        } catch(e) {}
-    });
-
-    window.addEventListener('pagehide', () => {
-        try {
-            sessionStorage.setItem('__automation_cursor_hidden', '1');
-            document.querySelectorAll('.__automation_ripple').forEach(r => r.remove());
-        } catch(e) {}
+    ['beforeunload', 'pagehide'].forEach((evtName) => {
+        window.addEventListener(evtName, () => {
+            try {
+                sessionStorage.setItem('__automation_cursor_hidden', '1');
+                document.querySelectorAll('.__automation_ripple').forEach(r => r.remove());
+            } catch(e) {}
+        });
     });
 
     function cleanDDG() {
@@ -646,13 +641,6 @@ def CaptureVideo_Magento(
         _active_page = page
         _current_cursor_x = 640.0
         _current_cursor_y = 360.0
-
-        try:
-            page.evaluate(
-                "() => { try { sessionStorage.removeItem('__automation_cursor_hidden'); sessionStorage.removeItem('__automation_zoom_state'); } catch(e) {} }"
-            )
-        except Exception:
-            pass
 
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
