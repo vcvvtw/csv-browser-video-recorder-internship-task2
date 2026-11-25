@@ -808,6 +808,21 @@ def CaptureVideo_Magento(
         ShowCallout(page, "Opening first result...", bgColor="#FFEB3B", textColor="#000000", fade=True)
         time.sleep(1.2)
 
+        try:
+            page.evaluate("el => { if (el) el.setAttribute('target', '_self'); }", first_result)
+        except Exception:
+            pass
+
+        # Re-read bounding box after callout pause in case dynamic banners shifted layout
+        fresh_box = None
+        try:
+            first_result.scroll_into_view_if_needed()
+            fresh_box = first_result.bounding_box()
+        except Exception:
+            pass
+        if fresh_box and fresh_box["width"] > 0 and fresh_box["height"] > 0:
+            target_box = fresh_box
+
         res_x = target_box["x"] + target_box["width"] / 2
         res_y = target_box["y"] + target_box["height"] / 2
 
@@ -829,17 +844,30 @@ def CaptureVideo_Magento(
             pass
 
         time.sleep(0.48)
-        page.mouse.click(res_x, res_y)
-        time.sleep(0.6)
+        results_url = page.url
 
-        # Keep page open for recording and smoothly zoom out on loaded page
         try:
-            page.wait_for_load_state("domcontentloaded", timeout=12000)
+            with page.expect_navigation(url=lambda u: u != results_url, wait_until="domcontentloaded", timeout=15000):
+                page.mouse.click(res_x, res_y)
+        except Exception:
+            if page.url == results_url:
+                try:
+                    with page.expect_navigation(url=lambda u: u != results_url, wait_until="domcontentloaded", timeout=12000):
+                        first_result.click()
+                except Exception:
+                    pass
+
+        # Ensure destination page is visible, then zoom out cleanly with active cursor motion so frames keep recording
+        time.sleep(0.8)
+        try:
+            page.evaluate("() => { if (window.__showCursor) window.__showCursor(); }")
         except Exception:
             pass
-        time.sleep(1.5)
+
         trigger_zoom(page, res_x, res_y)
-        time.sleep(2.0)
+        smooth_move_to(page, 640.0, 360.0, duration=1.5, steps=45)
+        smooth_move_to(page, 642.0, 362.0, duration=1.2, steps=35)
+        time.sleep(0.5)
 
         # Flush any pending async zoom IPC callbacks before closing context
         try:
