@@ -18,9 +18,9 @@ _context_start_time = 0.0
 _current_zoom_state = "out"
 
 
-def record_zoom_event(x, y, evt_type=None, timestamp=None):
+def record_zoom_event(x=None, y=None, evt_type=None, timestamp=None):
     """Record a zoom event with timestamp relative to video recording start."""
-    global _zoom_events, _context_start_time, _current_zoom_state
+    global _zoom_events, _context_start_time, _current_zoom_state, _current_cursor_x, _current_cursor_y
     if timestamp is None:
         if _context_start_time > 0:
             t = max(0.0, round(time.time() - _context_start_time, 2))
@@ -28,6 +28,16 @@ def record_zoom_event(x, y, evt_type=None, timestamp=None):
             t = 0.0
     else:
         t = float(timestamp)
+
+    if x is None:
+        x = _current_cursor_x
+    else:
+        _current_cursor_x = float(x)
+
+    if y is None:
+        y = _current_cursor_y
+    else:
+        _current_cursor_y = float(y)
 
     if evt_type is None:
         evt_type = "in" if _current_zoom_state == "out" else "out"
@@ -206,6 +216,7 @@ INJECT_OVERLAY_SCRIPT = """
                 }
                 .__automation_zoom_ring {
                     position: absolute;
+                    box-sizing: border-box;
                     width: 80px;
                     height: 80px;
                     border-radius: 50%;
@@ -239,6 +250,7 @@ INJECT_OVERLAY_SCRIPT = """
     window.__updateCursorPos = function(x, y) {
         window.__lastMouseX = x;
         window.__lastMouseY = y;
+        window.__mouseMovedHere = true;
         ensureElements();
         if (cursor) {
             cursor.style.transform = `translate(${x}px, ${y}px)`;
@@ -320,9 +332,45 @@ INJECT_OVERLAY_SCRIPT = """
         calloutBox.appendChild(item);
     };
 
-    window.__zoomState = 'out';
-    window.__lastMouseX = 640;
-    window.__lastMouseY = 360;
+    function getZoomState() {
+        try {
+            return sessionStorage.getItem('__automation_zoom_state') || 'out';
+        } catch(e) {
+            return window.__zoomState || 'out';
+        }
+    }
+
+    function setZoomState(state) {
+        window.__zoomState = state;
+        try {
+            sessionStorage.setItem('__automation_zoom_state', state);
+        } catch(e) {}
+    }
+
+    function getLastMousePos() {
+        let x = window.__lastMouseX;
+        let y = window.__lastMouseY;
+        try {
+            if (x === undefined || x === null) {
+                const sx = sessionStorage.getItem('__automation_cur_x');
+                if (sx !== null) x = parseFloat(sx);
+            }
+            if (y === undefined || y === null) {
+                const sy = sessionStorage.getItem('__automation_cur_y');
+                if (sy !== null) y = parseFloat(sy);
+            }
+        } catch(e) {}
+        return [
+            (x !== undefined && x !== null && !Number.isNaN(x)) ? x : 640,
+            (y !== undefined && y !== null && !Number.isNaN(y)) ? y : 360
+        ];
+    }
+
+    window.__zoomState = getZoomState();
+    const initPos = getLastMousePos();
+    window.__lastMouseX = initPos[0];
+    window.__lastMouseY = initPos[1];
+    window.__mouseMovedHere = false;
 
     window.__showZoomIndicator = function(x, y, zoomType) {
         ensureElements();
@@ -342,17 +390,42 @@ INJECT_OVERLAY_SCRIPT = """
         setTimeout(() => { try { ring.remove(); } catch(e) {} }, 550);
     };
 
-    window.__zoomAt = function(x, y) {
+    window.__zoomAt = async function(x, y) {
         ensureElements();
-        if (x === undefined || x === null) x = (window.__lastMouseX !== undefined) ? window.__lastMouseX : 640;
-        if (y === undefined || y === null) y = (window.__lastMouseY !== undefined) ? window.__lastMouseY : 360;
-        const nextType = (window.__zoomState === 'out') ? 'in' : 'out';
-        window.__zoomState = nextType;
-        window.__showZoomIndicator(x, y, nextType);
-        if (window.__pyRecordZoom) {
-            window.__pyRecordZoom(x, y, nextType);
+        let targetX = x;
+        let targetY = y;
+        if (targetX === undefined || targetX === null || targetY === undefined || targetY === null) {
+            if (window.__mouseMovedHere) {
+                const fallback = getLastMousePos();
+                if (targetX === undefined || targetX === null) targetX = fallback[0];
+                if (targetY === undefined || targetY === null) targetY = fallback[1];
+            } else {
+                targetX = null;
+                targetY = null;
+            }
         }
-        return {x: x, y: y, type: nextType};
+
+        if (window.__pyToggleZoom) {
+            const evt = await window.__pyToggleZoom(targetX, targetY);
+            if (evt) {
+                setZoomState(evt.type);
+                window.__lastMouseX = evt.x;
+                window.__lastMouseY = evt.y;
+                window.__showZoomIndicator(evt.x, evt.y, evt.type);
+                return evt;
+            }
+        }
+
+        const fallback = getLastMousePos();
+        if (targetX === null) targetX = fallback[0];
+        if (targetY === null) targetY = fallback[1];
+        const nextType = (getZoomState() === 'out') ? 'in' : 'out';
+        setZoomState(nextType);
+        window.__showZoomIndicator(targetX, targetY, nextType);
+        if (window.__pyRecordZoom) {
+            window.__pyRecordZoom(targetX, targetY, nextType);
+        }
+        return {x: targetX, y: targetY, type: nextType};
     };
 
     window.addEventListener('keydown', (e) => {
@@ -366,6 +439,7 @@ INJECT_OVERLAY_SCRIPT = """
     window.addEventListener('mousemove', (e) => {
         window.__lastMouseX = e.clientX;
         window.__lastMouseY = e.clientY;
+        window.__mouseMovedHere = true;
         window.__updateCursorPos(e.clientX, e.clientY);
     }, { passive: true, capture: true });
 
@@ -539,7 +613,7 @@ def CaptureVideo_Magento(
 
     _zoom_events = []
     _current_zoom_state = "out"
-    _context_start_time = time.time()
+    _context_start_time = 0.0
 
     playwright = None
     browser = None
@@ -571,17 +645,24 @@ def CaptureVideo_Magento(
         context.add_init_script("delete Object.getPrototypeOf(navigator).webdriver;")
         context.add_init_script(INJECT_OVERLAY_SCRIPT)
         context.expose_function(
+            "__pyToggleZoom",
+            lambda x=None, y=None: record_zoom_event(x, y),
+        )
+        context.expose_function(
             "__pyRecordZoom",
             lambda x, y, evt_type: record_zoom_event(x, y, evt_type),
         )
 
         page = context.new_page()
+        _context_start_time = time.time()
         _active_page = page
         _current_cursor_x = 640.0
         _current_cursor_y = 360.0
 
         try:
-            page.evaluate("() => { try { sessionStorage.removeItem('__automation_cursor_hidden'); } catch(e) {} }")
+            page.evaluate(
+                "() => { try { sessionStorage.removeItem('__automation_cursor_hidden'); sessionStorage.removeItem('__automation_zoom_state'); } catch(e) {} }"
+            )
         except Exception:
             pass
 
@@ -619,7 +700,7 @@ def CaptureVideo_Magento(
 
         # Trigger zoom-in around search box
         trigger_zoom(page, box_center_x, box_center_y)
-        time.sleep(0.4)
+        time.sleep(0.55)
 
         # Type search query
         search_query = f"Magento developer in {city}"
@@ -627,7 +708,7 @@ def CaptureVideo_Magento(
 
         # Trigger zoom-out after search query entry
         trigger_zoom(page, box_center_x, box_center_y)
-        time.sleep(0.4)
+        time.sleep(0.6)
 
         # Locate submit button
         submit_btn = None
@@ -732,6 +813,10 @@ def CaptureVideo_Magento(
 
         smooth_move_to(page, res_x, res_y)
 
+        # Zoom in on the target search result before clicking
+        trigger_zoom(page, res_x, res_y)
+        time.sleep(0.65)
+
         try:
             page.evaluate(
                 """([cx, cy]) => {
@@ -747,12 +832,20 @@ def CaptureVideo_Magento(
         page.mouse.click(res_x, res_y)
         time.sleep(0.6)
 
-        # Keep page open for recording
+        # Keep page open for recording and smoothly zoom out on loaded page
         try:
             page.wait_for_load_state("domcontentloaded", timeout=12000)
         except Exception:
             pass
-        time.sleep(3.5)
+        time.sleep(1.5)
+        trigger_zoom(page, res_x, res_y)
+        time.sleep(2.0)
+
+        # Flush any pending async zoom IPC callbacks before closing context
+        try:
+            page.wait_for_timeout(120)
+        except Exception:
+            pass
 
         # Finalize and save video
         video_obj = page.video
@@ -778,6 +871,8 @@ def CaptureVideo_Magento(
                     pass
             shutil.move(raw_video_path, target_video_path)
 
+        base_sidecar = f"{os.path.splitext(target_video_path)[0]}.zoom.json"
+        alt_sidecar = f"{target_video_path}.zoom.json"
         if _zoom_events:
             sidecar_data = {
                 "viewport": {"width": 1280, "height": 720},
@@ -786,9 +881,16 @@ def CaptureVideo_Magento(
                 "ramp_sec": 0.5,
                 "events": _zoom_events,
             }
-            sidecar_path = f"{os.path.splitext(target_video_path)[0]}.zoom.json"
-            with open(sidecar_path, "w", encoding="utf-8") as sf:
+            with open(base_sidecar, "w", encoding="utf-8") as sf:
                 json.dump(sidecar_data, sf, indent=2)
+        else:
+            # Remove any leftover sidecar from a previous recording so normal runs remain sidecar-free
+            for stale in (base_sidecar, alt_sidecar):
+                if os.path.exists(stale):
+                    try:
+                        os.remove(stale)
+                    except OSError:
+                        pass
 
         return os.path.abspath(target_video_path)
 

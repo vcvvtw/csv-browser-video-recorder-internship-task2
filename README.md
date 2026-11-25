@@ -23,9 +23,10 @@ Extension of the video recording pipeline and Dockerized web service with a **Ca
 | 2. Post-Processing Engine (apply_zoom.py)                                        |
 |    - Reads sidecar metadata (viewport, fps, zoom_factor, ramp_sec, events)       |
 |    - Normalizes events and pairs 'in' -> 'out' intervals (supports open-ended)   |
-|    - Clamps crop to frame boundaries: x = clip(px - iw/(2*zoom), 0, iw - iw/zoom)|
-|    - Evaluates smoothstep easing (3*p^2 - 2*p^3) for natural transitions         |
-|    - Executes or previews (--dry-run) ffmpeg zoompan command                     |
+|    - Normalizes PTS/CFR & 2x supersamples before zoompan to prevent shimmer      |
+|    - Maps mouse coords proportionally & clamps crop: clip(px*iw-iw/(2*z), ...)  |
+|    - Evaluates smoothstep easing (3*p^2 - 2*p^3) for smooth transitions         |
+|    - Executes or previews (--dry-run) ffmpeg VP9 command                         |
 +----------------------------------------------------------------------------------+
                                          |
                                          v
@@ -132,7 +133,7 @@ docker compose logs -f web
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/upload` | Multipart upload with `file` and optional `sidecar` |
+| `POST` | `/upload` | Multipart upload with `file` and optional `sidecar` (async by default, pass `?sync=1` to wait) |
 | `POST` | `/jobs/<id>/process` | Triggers ffmpeg zoom rendering on a video record |
 | `GET` | `/jobs/<id>` | Returns processing status (`pending`, `completed`, `failed`) |
 | `GET` | `/get_video_url?company_name=<name>` | Retrieves public URLs (original & processed) |

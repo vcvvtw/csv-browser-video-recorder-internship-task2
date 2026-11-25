@@ -153,7 +153,7 @@ class TestWebServiceUnit(unittest.TestCase):
 
             with patch("web_service.get_uploads_dir", return_value=tmpdir):
                 with patch("web_service.get_db", return_value=mock_conn):
-                    with patch("web_service.apply_zoom"):
+                    with patch("web_service.threading.Thread") as mock_thread:
                         data = {
                             "file": (BytesIO(b"WEBMDATA"), "sample.webm"),
                             "sidecar": (BytesIO(sidecar_content), "sample.zoom.json"),
@@ -164,7 +164,51 @@ class TestWebServiceUnit(unittest.TestCase):
                         payload = res.get_json()
                         self.assertEqual(payload["id"], 42)
                         self.assertEqual(payload["processing_status"], "pending")
+                        # While pending, processed_video_url must stay None (avoid 404 before ffmpeg completes)
+                        self.assertIsNone(payload["processed_video_url"])
+                        self.assertIn("/jobs/42", payload["job_url"])
+                        mock_thread.return_value.start.assert_called_once()
+
+    def test_upload_sync_with_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mock_conn = MagicMock()
+            mock_cur = MagicMock()
+            mock_cur.fetchone.return_value = (99,)
+            mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+
+            sidecar_content = json.dumps({
+                "viewport": {"width": 1280, "height": 720},
+                "events": [{"t": 1.0, "x": 640, "y": 360, "type": "in"}]
+            }).encode("utf-8")
+
+            with patch("web_service.get_uploads_dir", return_value=tmpdir):
+                with patch("web_service.get_db", return_value=mock_conn):
+                    with patch("web_service.apply_zoom") as mock_apply:
+                        data = {
+                            "file": (BytesIO(b"WEBMDATA"), "sample.webm"),
+                            "sidecar": (BytesIO(sidecar_content), "sample.zoom.json"),
+                            "company_name": "Acme Sync Tech",
+                            "sync": "1",
+                        }
+                        res = self.client.post("/upload", data=data, content_type="multipart/form-data")
+                        self.assertEqual(res.status_code, 200)
+                        payload = res.get_json()
+                        self.assertEqual(payload["processing_status"], "completed")
                         self.assertIn("zoomed.webm", payload["processed_video_url"])
+                        mock_apply.assert_called_once()
+
+    def test_upload_invalid_sidecar_json_cleans_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data = {
+                "file": (BytesIO(b"WEBMDATA"), "sample.webm"),
+                "sidecar": "{not valid json",
+                "company_name": "Bad Sidecar Co"
+            }
+            with patch("web_service.get_uploads_dir", return_value=tmpdir):
+                res = self.client.post("/upload", data=data, content_type="multipart/form-data")
+                self.assertEqual(res.status_code, 400)
+                self.assertIn("Invalid sidecar JSON", res.get_json()["error"])
+                self.assertEqual(len(os.listdir(tmpdir)), 0)
 
     def test_process_job_endpoint(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -16,6 +16,9 @@ ALLOWED_EXTENSIONS = {".webm", ".mp4"}
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
+_schema_lock = threading.Lock()
+_schema_initialized = False
+
 
 def get_uploads_dir() -> str:
     env = request.environ if has_request_context() else os.environ
@@ -47,9 +50,43 @@ def build_safe_filename(company_name: str, original_filename: str) -> str:
     return f"{slug}_{digest}{ext}"
 
 
+def _ensure_schema(conn) -> None:
+    global _schema_initialized
+    if _schema_initialized:
+        return
+    with _schema_lock:
+        if _schema_initialized:
+            return
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS videos (
+                    id SERIAL PRIMARY KEY,
+                    company_name TEXT NOT NULL UNIQUE,
+                    file_path TEXT NOT NULL,
+                    video_url TEXT NOT NULL,
+                    processed_file_path TEXT,
+                    processed_video_url TEXT,
+                    zoom_sidecar_path TEXT,
+                    processing_status TEXT NOT NULL DEFAULT 'none',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            cur.execute("ALTER TABLE videos ADD COLUMN IF NOT EXISTS processed_file_path TEXT;")
+            cur.execute("ALTER TABLE videos ADD COLUMN IF NOT EXISTS processed_video_url TEXT;")
+            cur.execute("ALTER TABLE videos ADD COLUMN IF NOT EXISTS zoom_sidecar_path TEXT;")
+            cur.execute("ALTER TABLE videos ADD COLUMN IF NOT EXISTS processing_status TEXT NOT NULL DEFAULT 'none';")
+        conn.commit()
+        _schema_initialized = True
+
+
 def get_db():
     if "db" not in g:
-        g.db = psycopg2.connect(**get_db_config())
+        conn = psycopg2.connect(**get_db_config())
+        _ensure_schema(conn)
+        g.db = conn
     return g.db
 
 
@@ -65,11 +102,18 @@ def close_db(error=None):
         conn.close()
 
 
-def _async_process_zoom(video_id: int, file_path: str, sidecar_path: str, dest_zoomed_path: str, processed_url: str):
+def _async_process_zoom(
+    video_id: int,
+    file_path: str,
+    sidecar_path: str,
+    dest_zoomed_path: str,
+    processed_url: str,
+    db_config: dict,
+):
     """Background worker to render Camtasia-style zoom using ffmpeg."""
     try:
         apply_zoom(file_path, sidecar_path=sidecar_path, output_path=dest_zoomed_path)
-        conn = psycopg2.connect(**get_db_config())
+        conn = psycopg2.connect(**db_config)
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -89,19 +133,21 @@ def _async_process_zoom(video_id: int, file_path: str, sidecar_path: str, dest_z
     except Exception as exc:
         app.logger.error("Background zoom processing failed for video ID %s: %s", video_id, exc)
         try:
-            conn = psycopg2.connect(**get_db_config())
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE videos
-                    SET processing_status = 'failed',
-                        updated_at = NOW()
-                    WHERE id = %s;
-                    """,
-                    (video_id,),
-                )
-            conn.commit()
-            conn.close()
+            conn = psycopg2.connect(**db_config)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE videos
+                        SET processing_status = 'failed',
+                            updated_at = NOW()
+                        WHERE id = %s;
+                        """,
+                        (video_id,),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
         except Exception:
             pass
 
@@ -112,28 +158,7 @@ def init_db() -> None:
 
     conn = psycopg2.connect(**get_db_config())
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS videos (
-                    id SERIAL PRIMARY KEY,
-                    company_name TEXT NOT NULL UNIQUE,
-                    file_path TEXT NOT NULL,
-                    video_url TEXT NOT NULL,
-                    processed_file_path TEXT,
-                    processed_video_url TEXT,
-                    zoom_sidecar_path TEXT,
-                    processing_status TEXT NOT NULL DEFAULT 'none',
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                );
-                ALTER TABLE videos ADD COLUMN IF NOT EXISTS processed_file_path TEXT;
-                ALTER TABLE videos ADD COLUMN IF NOT EXISTS processed_video_url TEXT;
-                ALTER TABLE videos ADD COLUMN IF NOT EXISTS zoom_sidecar_path TEXT;
-                ALTER TABLE videos ADD COLUMN IF NOT EXISTS processing_status TEXT NOT NULL DEFAULT 'none';
-                """
-            )
-        conn.commit()
+        _ensure_schema(conn)
     finally:
         conn.close()
 
@@ -199,33 +224,55 @@ def upload():
     sidecar_text = request.form.get("sidecar")
 
     base_dest_no_ext = os.path.splitext(dest_path)[0]
+    default_sidecar_path = f"{base_dest_no_ext}.zoom.json"
+
     if sidecar_file and sidecar_file.filename:
-        sidecar_dest_path = f"{base_dest_no_ext}.zoom.json"
+        sidecar_dest_path = default_sidecar_path
         sidecar_file.save(sidecar_dest_path)
-    elif sidecar_text:
+    elif sidecar_text and sidecar_text.strip():
         try:
             parsed = json.loads(sidecar_text)
-            sidecar_dest_path = f"{base_dest_no_ext}.zoom.json"
-            with open(sidecar_dest_path, "w", encoding="utf-8") as sf:
-                json.dump(parsed, sf, indent=2)
         except Exception:
-            pass
+            if os.path.exists(dest_path):
+                try:
+                    os.remove(dest_path)
+                except OSError:
+                    pass
+            return jsonify({"error": "Invalid sidecar JSON payload"}), 400
+        sidecar_dest_path = default_sidecar_path
+        with open(sidecar_dest_path, "w", encoding="utf-8") as sf:
+            json.dump(parsed, sf, indent=2)
+    else:
+        for stale in (default_sidecar_path, f"{dest_path}.zoom.json"):
+            if os.path.exists(stale):
+                try:
+                    os.remove(stale)
+                except OSError:
+                    pass
 
     zoomed_filename = f"{os.path.basename(base_dest_no_ext)}.zoomed.webm"
     dest_zoomed_path = os.path.join(uploads_dir, zoomed_filename)
     processed_url = f"{request.host_url.rstrip('/')}/media/{zoomed_filename}"
     initial_status = "pending" if sidecar_dest_path else "none"
+    sync_mode = (request.args.get("sync") or request.form.get("sync") or "").lower() in ("1", "true", "yes")
 
     try:
         conn = get_db()
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO videos (company_name, file_path, video_url, zoom_sidecar_path, processing_status, created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                INSERT INTO videos (
+                    company_name, file_path, video_url,
+                    processed_file_path, processed_video_url,
+                    zoom_sidecar_path, processing_status,
+                    created_at, updated_at
+                )
+                VALUES (%s, %s, %s, NULL, NULL, %s, %s, NOW(), NOW())
                 ON CONFLICT (company_name) DO UPDATE SET
                     file_path = EXCLUDED.file_path,
                     video_url = EXCLUDED.video_url,
+                    processed_file_path = NULL,
+                    processed_video_url = NULL,
                     zoom_sidecar_path = EXCLUDED.zoom_sidecar_path,
                     processing_status = EXCLUDED.processing_status,
                     updated_at = NOW()
@@ -237,32 +284,61 @@ def upload():
         conn.commit()
     except Exception as exc:
         app.logger.error("Failed to save video metadata for %s: %s", company_name, exc)
-        if os.path.exists(dest_path):
-            try:
-                os.remove(dest_path)
-            except OSError:
-                pass
-        if sidecar_dest_path and os.path.exists(sidecar_dest_path):
-            try:
-                os.remove(sidecar_dest_path)
-            except OSError:
-                pass
+        for cleanup_path in (dest_path, sidecar_dest_path):
+            if cleanup_path and os.path.exists(cleanup_path):
+                try:
+                    os.remove(cleanup_path)
+                except OSError:
+                    pass
         return jsonify({"error": "Database error while saving video metadata"}), 500
 
+    final_status = initial_status
+    final_processed_url = None
+
     if sidecar_dest_path:
-        worker = threading.Thread(
-            target=_async_process_zoom,
-            args=(video_id, dest_path, sidecar_dest_path, dest_zoomed_path, processed_url),
-            daemon=True,
-        )
-        worker.start()
+        if sync_mode:
+            try:
+                apply_zoom(dest_path, sidecar_path=sidecar_dest_path, output_path=dest_zoomed_path)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE videos
+                        SET processed_file_path = %s,
+                            processed_video_url = %s,
+                            processing_status = 'completed',
+                            updated_at = NOW()
+                        WHERE id = %s;
+                        """,
+                        (dest_zoomed_path, processed_url, video_id),
+                    )
+                conn.commit()
+                final_status = "completed"
+                final_processed_url = processed_url
+            except Exception as exc:
+                app.logger.error("Sync zoom processing failed for video ID %s: %s", video_id, exc)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE videos SET processing_status = 'failed', updated_at = NOW() WHERE id = %s;",
+                        (video_id,),
+                    )
+                conn.commit()
+                final_status = "failed"
+        else:
+            db_config = get_db_config()
+            worker = threading.Thread(
+                target=_async_process_zoom,
+                args=(video_id, dest_path, sidecar_dest_path, dest_zoomed_path, processed_url, db_config),
+                daemon=True,
+            )
+            worker.start()
 
     return jsonify({
         "id": video_id,
         "company_name": company_name,
         "video_url": video_url,
-        "processed_video_url": processed_url if sidecar_dest_path else None,
-        "processing_status": initial_status,
+        "processed_video_url": final_processed_url,
+        "processing_status": final_status,
+        "job_url": f"{request.host_url.rstrip('/')}/jobs/{video_id}",
     }), 200
 
 
@@ -318,7 +394,7 @@ def process_job(job_id: int):
                 (job_id,),
             )
         conn.commit()
-        return jsonify({"error": f"Processing failed: {exc}"}), 500
+        return jsonify({"error": "Video zoom processing failed"}), 500
 
 
 @app.get("/jobs/<int:job_id>")
