@@ -182,44 +182,32 @@ INJECT_OVERLAY_SCRIPT = """
                 }
                 @keyframes __zoom_ring_in_anim {
                     0% {
-                        transform: translate(-50%, -50%) scale(0.2);
+                        transform: translate(-50%, -50%) scale(0.8);
                         opacity: 0.95;
-                        border-width: 4px;
-                    }
-                    50% {
-                        transform: translate(-50%, -50%) scale(1.3);
-                        opacity: 0.85;
-                        border-width: 3px;
                     }
                     100% {
-                        transform: translate(-50%, -50%) scale(2.0);
+                        transform: translate(-50%, -50%) scale(1.1);
                         opacity: 0;
-                        border-width: 1px;
                     }
                 }
                 @keyframes __zoom_ring_out_anim {
                     0% {
-                        transform: translate(-50%, -50%) scale(2.0);
-                        opacity: 0.95;
-                        border-width: 4px;
-                    }
-                    50% {
                         transform: translate(-50%, -50%) scale(1.1);
-                        opacity: 0.85;
-                        border-width: 3px;
+                        opacity: 0.95;
                     }
                     100% {
-                        transform: translate(-50%, -50%) scale(0.2);
+                        transform: translate(-50%, -50%) scale(0.8);
                         opacity: 0;
-                        border-width: 1px;
                     }
                 }
                 .__automation_zoom_ring {
                     position: absolute;
                     box-sizing: border-box;
-                    width: 80px;
-                    height: 80px;
+                    width: 26px;
+                    height: 26px;
                     border-radius: 50%;
+                    border-width: 2px;
+                    border-style: solid;
                     pointer-events: none;
                     z-index: 2147483647;
                 }
@@ -380,14 +368,13 @@ INJECT_OVERLAY_SCRIPT = """
         ring.style.left = x + 'px';
         ring.style.top = y + 'px';
         const isIn = (zoomType === 'in');
-        ring.style.borderColor = isIn ? '#00E676' : '#FF5252';
-        ring.style.borderStyle = 'solid';
-        ring.style.boxShadow = isIn ? '0 0 16px rgba(0, 230, 118, 0.85)' : '0 0 16px rgba(255, 82, 82, 0.85)';
-        ring.style.animation = isIn 
-            ? '__zoom_ring_in_anim 500ms ease-out forwards' 
-            : '__zoom_ring_out_anim 500ms ease-out forwards';
+        ring.style.borderColor = isIn ? '#00C853' : '#FF5252';
+        ring.style.boxShadow = isIn ? '0 0 6px rgba(0, 200, 83, 0.55)' : '0 0 6px rgba(255, 82, 82, 0.55)';
+        ring.style.animation = isIn
+            ? '__zoom_ring_in_anim 280ms ease-out forwards'
+            : '__zoom_ring_out_anim 280ms ease-out forwards';
         container.appendChild(ring);
-        setTimeout(() => { try { ring.remove(); } catch(e) {} }, 550);
+        setTimeout(() => { try { ring.remove(); } catch(e) {} }, 320);
     };
 
     window.__zoomAt = async function(x, y) {
@@ -654,7 +641,8 @@ def CaptureVideo_Magento(
         )
 
         page = context.new_page()
-        _context_start_time = time.time()
+        page_init_wall = time.time()
+        _context_start_time = page_init_wall
         _active_page = page
         _current_cursor_x = 640.0
         _current_cursor_y = 360.0
@@ -666,8 +654,27 @@ def CaptureVideo_Magento(
         except Exception:
             pass
 
-        # Open page and locate search input
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+        # Calibrate t=0 to Chromium's initial frame capture (domInteractive)
+        try:
+            frame0_epoch = page.evaluate("""() => {
+                const originSec = (Date.now() - performance.now()) / 1000.0;
+                const nav = performance.getEntriesByType('navigation')[0];
+                if (nav && nav.domInteractive > 0) {
+                    return originSec + nav.domInteractive / 1000.0;
+                }
+                const paints = performance.getEntriesByType('paint');
+                const fp = paints.find(p => p.name === 'first-paint') || paints[0];
+                return fp ? originSec + fp.startTime / 1000.0 : null;
+            }""")
+            now_t = time.time()
+            if isinstance(frame0_epoch, (int, float)) and page_init_wall <= frame0_epoch <= now_t:
+                _context_start_time = float(frame0_epoch)
+            else:
+                _context_start_time = now_t
+        except Exception:
+            _context_start_time = time.time()
 
         search_box = None
         for sel in ['textarea[name="q"]', 'input[name="q"]', '[name="q"]']:
@@ -684,12 +691,10 @@ def CaptureVideo_Magento(
 
         time.sleep(0.5)
 
-        # Initial notification banner
         callout_text = f"Searching for {company_name} in {city}"
         ShowCallout(page, callout_text, bgColor="#FFEB3B", textColor="#000000", fade=True)
         time.sleep(1.8)
 
-        # Focus search box
         box_rect = search_box.bounding_box()
         if not box_rect:
             raise RuntimeError("Search box bounding box is not available")
@@ -697,16 +702,15 @@ def CaptureVideo_Magento(
         box_center_x = box_rect["x"] + box_rect["width"] / 2
         box_center_y = box_rect["y"] + box_rect["height"] / 2
         human_click(page, box_center_x, box_center_y)
-
-        # Trigger zoom-in around search box
-        trigger_zoom(page, box_center_x, box_center_y)
         time.sleep(0.55)
 
-        # Type search query
+        trigger_zoom(page, box_center_x, box_center_y)
+        time.sleep(0.6)
+
         search_query = f"Magento developer in {city}"
         type_human_like(page, search_query)
+        time.sleep(0.35)
 
-        # Trigger zoom-out after search query entry
         trigger_zoom(page, box_center_x, box_center_y)
         time.sleep(0.6)
 
@@ -828,14 +832,16 @@ def CaptureVideo_Magento(
 
         smooth_move_to(page, res_x, res_y)
 
-        # Zoom in on the target search result before clicking
+        trigger_zoom(page, res_x, res_y)
+        time.sleep(1.5)
+
         trigger_zoom(page, res_x, res_y)
         time.sleep(0.65)
 
         try:
             page.evaluate(
                 """([cx, cy]) => {
-                    if (window.__triggerRipple) window.__triggerRipple(cx, cy, 450);
+                    if (window.__triggerRipple) window.__triggerRipple(cx, cy, 420);
                     window.__suppressNextRipple = true;
                 }""",
                 [res_x, res_y],
@@ -843,7 +849,7 @@ def CaptureVideo_Magento(
         except Exception:
             pass
 
-        time.sleep(0.48)
+        time.sleep(0.45)
         results_url = page.url
 
         try:
@@ -857,17 +863,15 @@ def CaptureVideo_Magento(
                 except Exception:
                     pass
 
-        # Ensure destination page is visible, then zoom out cleanly with active cursor motion so frames keep recording
         time.sleep(0.8)
         try:
             page.evaluate("() => { if (window.__showCursor) window.__showCursor(); }")
         except Exception:
             pass
 
-        trigger_zoom(page, res_x, res_y)
-        smooth_move_to(page, 640.0, 360.0, duration=1.5, steps=45)
-        smooth_move_to(page, 642.0, 362.0, duration=1.2, steps=35)
-        time.sleep(0.5)
+        smooth_move_to(page, 640.0, 360.0, duration=1.4, steps=42)
+        smooth_move_to(page, 644.0, 362.0, duration=1.0, steps=30)
+        time.sleep(0.4)
 
         # Flush any pending async zoom IPC callbacks before closing context
         try:
